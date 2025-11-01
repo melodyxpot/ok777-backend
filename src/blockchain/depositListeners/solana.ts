@@ -7,7 +7,6 @@ import {
 } from '@solana/web3.js';
 import prisma from '../../db/prisma';
 import { convert } from '../../utils/exchange';
-import { incrementBalance } from '../../db/gsc';
 import 'dotenv/config';
 
 
@@ -71,16 +70,16 @@ function parseSOLTransfer(
     }
 
     const instructions = transaction.transaction.message.instructions;
-    
+
     for (const instruction of instructions) {
       if ('parsed' in instruction && instruction.parsed?.type === 'transfer') {
         const parsed = instruction.parsed as any;
-        
+
         // Check if this is a transfer TO our user address
         if (parsed.info.destination === userAddress) {
           const amount = parsed.info.lamports / LAMPORTS_PER_SOL;
           const fromAddress = parsed.info.source;
-          
+
           return {
             amount,
             fromAddress
@@ -106,15 +105,13 @@ async function processDeposit(
   blockNumber: number
 ): Promise<void> {
   try {
-    console.log(`🔄 Processing SOL deposit: ${amount} SOL to user ${userId}`);
-
     // Generate unique order ID
     const orderId = `SOL_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 
     // Get exchange rate to USD
     let rate = 1;
     let realArrival = amount;
-    
+
     try {
       rate = await convert(1, 'SOL', 'USD');
       realArrival = await convert(amount, 'SOL', 'USD');
@@ -143,14 +140,31 @@ async function processDeposit(
       }
     });
 
-    // Update user balance
-    await incrementBalance(prisma, userId, 'SOL', amount);
+    // Update user balance using transaction
+    await prisma.$transaction(async (tx) => {
+      const balance = await tx.balance.findFirst({
+        where: { userId, currency: 'SOL' }
+      });
+
+      if (!balance) {
+        // Create balance if it doesn't exist
+        await tx.balance.create({
+          data: { userId, currency: 'SOL', amount }
+        });
+      } else {
+        // Increment existing balance
+        await tx.balance.update({
+          where: { userId_currency: { userId, currency: 'SOL' } },
+          data: { amount: { increment: amount } }
+        });
+      }
+    });
 
     // Add to processed transactions
     processedTransactions.add(txHash);
 
     console.log(`✅ SOL deposit processed: ${amount} SOL for user ${userId} (Order: ${orderId})`);
-    
+
   } catch (error) {
     console.error('Error processing SOL deposit:', error);
     throw error;
@@ -160,10 +174,8 @@ async function processDeposit(
 // Monitor a single Solana address for deposits
 async function monitorSolanaAddress(userId: number, address: string): Promise<void> {
   try {
-    console.log(`🔍 Monitoring Solana address: ${address} for user ${userId}`);
-
     const publicKey = new PublicKey(address);
-    
+
     // Get recent signatures for this address
     const signatures = await connection.getSignaturesForAddress(publicKey, {
       limit: 10
@@ -171,7 +183,7 @@ async function monitorSolanaAddress(userId: number, address: string): Promise<vo
 
     for (const signatureInfo of signatures) {
       const txHash = signatureInfo.signature;
-      
+
       // Skip if already processed
       if (await isTransactionProcessed(txHash)) {
         continue;
@@ -189,7 +201,7 @@ async function monitorSolanaAddress(userId: number, address: string): Promise<vo
 
         // Parse SOL transfer
         const transfer = parseSOLTransfer(transaction, address);
-        
+
         if (transfer && transfer.amount > 0) {
           await processDeposit(
             userId,
@@ -215,26 +227,19 @@ async function monitorSolanaAddress(userId: number, address: string): Promise<vo
 // Main Solana deposit monitoring function
 export async function monitorSolanaDeposits(): Promise<void> {
   try {
-    console.log('🚀 Starting Solana deposit monitoring...');
-    
     const addresses = await getUserSolanaAddresses();
-    
+
     if (addresses.length === 0) {
-      console.log('ℹ️ No Solana addresses found to monitor');
       return;
     }
 
-    console.log(`📊 Monitoring ${addresses.length} Solana addresses`);
-
     // Process all addresses in parallel
     await Promise.all(
-      addresses.map(({ userId, address }) => 
+      addresses.map(({ userId, address }) =>
         monitorSolanaAddress(userId, address)
       )
     );
 
-    console.log('✅ Solana deposit monitoring completed');
-    
   } catch (error) {
     console.error('❌ Error in Solana deposit monitoring:', error);
   }
@@ -242,11 +247,9 @@ export async function monitorSolanaDeposits(): Promise<void> {
 
 // Start continuous monitoring
 export function startSolanaDepositMonitoring(): void {
-  console.log('🔄 Starting continuous Solana deposit monitoring...');
-  
   // Run immediately
   monitorSolanaDeposits();
-  
+
   // Then run every 5 seconds for near-realtime updates
   setInterval(monitorSolanaDeposits, 5000);
 }

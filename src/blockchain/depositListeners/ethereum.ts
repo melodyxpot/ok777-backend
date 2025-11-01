@@ -1,7 +1,6 @@
 import { ethers } from 'ethers';
 import prisma from '../../db/prisma';
 import { convert } from '../../utils/exchange';
-import { incrementBalance } from '../../db/gsc';
 import 'dotenv/config';
 
 
@@ -101,7 +100,7 @@ function parseETHTransfer(
     if (transaction.to?.toLowerCase() === userAddress.toLowerCase() && transaction.value > 0) {
       const amount = parseFloat(ethers.formatEther(transaction.value));
       const fromAddress = transaction.from;
-      
+
       return {
         amount,
         fromAddress
@@ -126,15 +125,13 @@ async function processDeposit(
   currency: string = 'ETH'
 ): Promise<void> {
   try {
-    console.log(`🔄 Processing ${currency} deposit: ${amount} ${currency} to user ${userId}`);
-
     // Generate unique order ID
     const orderId = `${currency}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 
     // Get exchange rate to USD
     let rate = 1;
     let realArrival = amount;
-    
+
     try {
       rate = await convert(1, currency, 'USD');
       realArrival = await convert(amount, currency, 'USD');
@@ -163,14 +160,31 @@ async function processDeposit(
       }
     });
 
-    // Update user balance
-    await incrementBalance(prisma, userId, currency, amount);
+    // Update user balance using transaction
+    await prisma.$transaction(async (tx) => {
+      const balance = await tx.balance.findFirst({
+        where: { userId, currency }
+      });
+
+      if (!balance) {
+        // Create balance if it doesn't exist
+        await tx.balance.create({
+          data: { userId, currency, amount }
+        });
+      } else {
+        // Increment existing balance
+        await tx.balance.update({
+          where: { userId_currency: { userId, currency } },
+          data: { amount: { increment: amount } }
+        });
+      }
+    });
 
     // Add to processed transactions
     processedTransactions.add(txHash);
 
     console.log(`✅ ${currency} deposit processed: ${amount} ${currency} for user ${userId} (Order: ${orderId})`);
-    
+
   } catch (error) {
     console.error(`Error processing ${currency} deposit:`, error);
     throw error;
@@ -180,8 +194,6 @@ async function processDeposit(
 // Monitor a single Ethereum address for deposits
 async function monitorEthereumAddress(userId: number, address: string): Promise<void> {
   try {
-    console.log(`🔍 Monitoring Ethereum address: ${address} for user ${userId}`);
-
     // Get the last processed block for this address
     const lastDeposit = await prisma.deposit.findFirst({
       where: {
@@ -206,7 +218,7 @@ async function monitorEthereumAddress(userId: number, address: string): Promise<
 
     for (const transaction of transactions) {
       const txHash = transaction.hash;
-      
+
       // Skip if already processed
       if (await isTransactionProcessed(txHash)) {
         continue;
@@ -215,7 +227,7 @@ async function monitorEthereumAddress(userId: number, address: string): Promise<
       try {
         // Parse ETH transfer
         const transfer = parseETHTransfer(transaction, address);
-        
+
         if (transfer && transfer.amount > 0) {
           await processDeposit(
             userId,
@@ -242,26 +254,19 @@ async function monitorEthereumAddress(userId: number, address: string): Promise<
 // Main Ethereum deposit monitoring function
 export async function monitorEthereumDeposits(): Promise<void> {
   try {
-    console.log('🚀 Starting Ethereum deposit monitoring...');
-    
     const addresses = await getUserEthereumAddresses();
-    
+
     if (addresses.length === 0) {
-      console.log('ℹ️ No Ethereum addresses found to monitor');
       return;
     }
 
-    console.log(`📊 Monitoring ${addresses.length} Ethereum addresses`);
-
     // Process all addresses in parallel
     await Promise.all(
-      addresses.map(({ userId, address }) => 
+      addresses.map(({ userId, address }) =>
         monitorEthereumAddress(userId, address)
       )
     );
 
-    console.log('✅ Ethereum deposit monitoring completed');
-    
   } catch (error) {
     console.error('❌ Error in Ethereum deposit monitoring:', error);
   }
@@ -269,11 +274,9 @@ export async function monitorEthereumDeposits(): Promise<void> {
 
 // Start continuous monitoring
 export function startEthereumDepositMonitoring(): void {
-  console.log('🔄 Starting continuous Ethereum deposit monitoring...');
-  
   // Run immediately
   monitorEthereumDeposits();
-  
+
   // Then run every 5 seconds for near-realtime updates
   setInterval(monitorEthereumDeposits, 5000);
 }

@@ -1,6 +1,4 @@
 import express from 'express';
-import morgan from 'morgan';
-import helmet from 'helmet';
 import seamless from './api/seamless';
 import cors from 'cors';
 import * as middlewares from './middlewares';
@@ -8,7 +6,6 @@ import api from './api';
 import telegramAuth from './api/telegram';
 import MessageResponse from './interfaces/MessageResponse';
 import path from "path";
-import http from "http";
 import { Server } from "socket.io";
 // Defer blockchain/game imports to runtime flags to avoid top-level side effects
 require('dotenv').config();
@@ -93,8 +90,13 @@ if (process.env.ENABLE_ETH_WATCHERS === "true") {
 
 if (process.env.ENABLE_SOL_WATCHERS === "true") {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const { startWatchSolana } = require("./blockchain/solana");
-  startWatchSolana();
+  const { initializeSolana, startWatchSolana } = require("./blockchain/solana");
+  try {
+    initializeSolana();
+    startWatchSolana();
+  } catch (error) {
+    console.error("Failed to initialize Solana:", error);
+  }
 }
 
 if (process.env.ENABLE_GAMES === "true") {

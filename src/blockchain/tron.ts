@@ -59,8 +59,7 @@ const pollBlocks = async () => {
                     const addr = wallets.find(a => a.publicKey === to);
                     if (addr && amount.gt(0)) {
                         const incomingTxId = tx.txID;
-                        console.log(`TRX deposit detected: ${amount.toString()} to ${to}`);
-                        console.log(`Incoming TRX: ${amount.toString()} to ${to}`);
+                        console.log(`💰 TRX deposit: ${amount.toString()} TRX to user ${addr.userId}`);
                         if (amount.toNumber() > 5) {
                             transferToMain(addr, amount, incomingTxId);
                         }
@@ -92,8 +91,7 @@ const transferToMain = async (wallet: any, amount: BigNumber, txId: string) => {
         await saveTransaction(wallet.userId, wallet.publicKey, amountToSend.toNumber(), "TRX", txId, "deposit");
         await topBalance(wallet.userId, amountUSD, "USD");
 
-        console.log(`✅ Swept ${amountToSend} TRX from ${wallet.publicKey} → main pool`);
-        console.log(`TxID: ${tx.txid}`);
+        console.log(`✅ TRX swept: ${amountToSend} TRX to main pool | User ${wallet.userId} | TX: ${tx.txid}`);
 
     } catch (err) {
         console.log(err);
@@ -125,39 +123,33 @@ export const maybeSweepUserDeposit = async (
 	const balance = parseFloat(tw.toBigNumber(balanceRaw).div(1e6).toString());
 
     if (balance < MIN_SWEEP_USDT) {
-        console.log(`⏳ Balance ${balance} USDT < ${MIN_SWEEP_USDT}, skip sweep`);
         return;
     }
 
-    console.log(`✅ ${balance} USDT detected, sweeping to main pool...`);
 	// check TRX balance for fees
 	const trxBalance = await tw.trx.getBalance(depositAddr);
     if (trxBalance < GAS_AMOUNT) {
-        console.log("Gas top")
 	const tronWebIns = getTronWeb();
         tronWebIns.setPrivateKey(MAIN_POOL_PK);
         const { txid } = await tronWebIns.trx.sendTransaction(depositAddr, GAS_AMOUNT,);
-        console.log(`💸 Funded gas: 2 TRX to ${depositAddr}, tx: ${txid}`);
         await waitForConfirmation(txid);
     }
 
     const tronWebIns = getTronWeb();
     tronWebIns.setPrivateKey(decryptPrivateKey(depositPk));
-    console.log("Send")
     const contract2 = await tronWebIns.contract().at(USDT_CONTRACT);
     const txId = await contract2.transfer(MAIN_POOL_ADDRESS, balanceRaw).send({
         feeLimit: 100_000_000,  // energy limit
         callValue: 0,           // TRX amount to send (0 for tokens)
         shouldPollResponse: true
     });
-    console.log(`🚀 Swept ${balance} USDT → main pool, tx: ${txId}`);
 
 	const amountToSend = tw.toBigNumber(balanceRaw).div(1e6);
 
     await saveTransaction(userId, depositAddr, amountToSend.toNumber(), "USDT", incomingTxId, "deposit");
     await topBalance(userId, amountToSend.toNumber(), "USD");
 
-    console.log("Balance updated.")
+    console.log(`💰 USDT deposit: ${balance} USDT swept to main pool | User ${userId} | TX: ${txId}`)
 
     return txId;
 };
@@ -165,6 +157,13 @@ export const maybeSweepUserDeposit = async (
 
 const checkBalances = async () => {
     try {
+        if (!USDT_CONTRACT) {
+            console.error('❌ TRON_USDT_CONTRACT not configured in .env file');
+            return;
+        }
+
+        console.log(`🔍 USDT Contract: ${USDT_CONTRACT}`);
+        console.log(`🔍 Tron Network: ${process.env.TRON_FULLNODE}`);
 
         const tronWebIns = getTronWeb();
         const contract = await tronWebIns.contract().at(USDT_CONTRACT);
@@ -177,11 +176,10 @@ const checkBalances = async () => {
             const balance = new BigNumber(balanceRaw).div(1e6);
 
             if (balance.gte(MIN_SWEEP_USDT)) {
-                console.log(`💰 Sweeping ${balance.toString()} USDT from ${addr} to main pool`);
                 try {
                     await maybeSweepUserDeposit(wallet.publicKey, wallet.privateKey, '-', wallet.userId, balanceRaw)
                 } catch (err) {
-                    console.error(`Sweep failed for ${addr}:`, err);
+                    console.error(`❌ USDT sweep failed for user ${wallet.userId}:`, err.message);
                 }
             }
         }
@@ -207,8 +205,6 @@ export const withdrawTokenTron = async (userId: number, to: string, amount: numb
 
     const rawAmount = new BigNumber(amount).times(1e6).toFixed(0);
 
-    console.log(`🚀 Withdrawing ${amount} USDT from main pool -> ${to}`);
-
     const txId = await contract.transfer(to, rawAmount).send({
         feeLimit: 100_000_000,
         callValue: 0,
@@ -217,7 +213,7 @@ export const withdrawTokenTron = async (userId: number, to: string, amount: numb
 
     await saveTransaction(userId, to, -amount, "USDT", '-', "withdraw")
 
-    console.log(`✅ Withdrawal successful | TxID: ${txId}`);
+    console.log(`💸 USDT withdrawal: ${amount} USDT to ${to} | User ${userId} | TX: ${txId}`);
     return txId;
 
 };
@@ -230,17 +226,13 @@ export const withdrawTrx = async (userId: number, to: string, amount: number) =>
 
     const rawAmount = new BigNumber(parseInt(amount.toString())).times(1e6);
 
-    console.log(`🚀 Withdrawing ${amount} TRX to ${to}`);
-
     const tx = await tronWebIns.trx.sendTransaction(to, rawAmount.toNumber());
 
     if (!tx?.txid) throw new Error('Tx failed or not broadcasted');
 
-    console.log(`✅ Tx confirmed: ${tx.txid}`);
-
     await saveTransaction(userId, to, -amount, "TRX", tx.txid, "withdraw")
 
-    console.log(`📉 User ${userId} TRX balance reduced by ${amount}`);
+    console.log(`💸 TRX withdrawal: ${amount} TRX to ${to} | User ${userId} | TX: ${tx.txid}`);
 
 };
 

@@ -1,6 +1,5 @@
 import prisma from '../../db/prisma';
 import { convert } from '../../utils/exchange';
-import { incrementBalance } from '../../db/gsc';
 import 'dotenv/config';
 
 // Tron configuration - support both Shasta and Mainnet so DB addresses can be labeled either way
@@ -72,20 +71,20 @@ async function getRecentTransactions(address: string, limit: number = 20): Promi
     console.warn('TronWeb not available');
     return [];
   }
-  
+
   try {
     const results: any[] = [];
     if (tronWebShasta) {
       try {
         const txs = await tronWebShasta.trx.getTransactionsRelated(address, 'to', limit);
         if (Array.isArray(txs)) results.push(...txs);
-      } catch {}
+      } catch { }
     }
     if (tronWebMainnet) {
       try {
         const txs = await tronWebMainnet.trx.getTransactionsRelated(address, 'to', limit);
         if (Array.isArray(txs)) results.push(...txs);
-      } catch {}
+      } catch { }
     }
     const uniq = new Map<string, any>();
     for (const tx of results) uniq.set(tx.txID, tx);
@@ -109,11 +108,11 @@ function parseTRXTransfer(
           const parameter = contract.parameter.value;
           const converter = (tronWebShasta || tronWebMainnet);
           const toAddress = converter.address.fromHex(parameter.to_address);
-          
+
           if (toAddress === userAddress && parameter.amount > 0) {
             const amount = parameter.amount / 1000000; // Convert from Sun to TRX
             const fromAddress = converter.address.fromHex(parameter.owner_address);
-            
+
             return {
               amount,
               fromAddress
@@ -141,15 +140,13 @@ async function processDeposit(
   currency: string = 'TRX'
 ): Promise<void> {
   try {
-    console.log(`🔄 Processing ${currency} deposit: ${amount} ${currency} to user ${userId}`);
-
     // Generate unique order ID
     const orderId = `${currency}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 
     // Get exchange rate to USD
     let rate = 1;
     let realArrival = amount;
-    
+
     try {
       rate = await convert(1, currency, 'USD');
       realArrival = await convert(amount, currency, 'USD');
@@ -178,14 +175,31 @@ async function processDeposit(
       }
     });
 
-    // Update user balance
-    await incrementBalance(prisma, userId, currency, amount);
+    // Update user balance using transaction
+    await prisma.$transaction(async (tx) => {
+      const balance = await tx.balance.findFirst({
+        where: { userId, currency }
+      });
+
+      if (!balance) {
+        // Create balance if it doesn't exist
+        await tx.balance.create({
+          data: { userId, currency, amount }
+        });
+      } else {
+        // Increment existing balance
+        await tx.balance.update({
+          where: { userId_currency: { userId, currency } },
+          data: { amount: { increment: amount } }
+        });
+      }
+    });
 
     // Add to processed transactions
     processedTransactions.add(txHash);
 
     console.log(`✅ ${currency} deposit processed: ${amount} ${currency} for user ${userId} (Order: ${orderId})`);
-    
+
   } catch (error) {
     console.error(`Error processing ${currency} deposit:`, error);
     throw error;
@@ -195,14 +209,12 @@ async function processDeposit(
 // Monitor a single Tron address for deposits
 async function monitorTronAddress(userId: number, address: string): Promise<void> {
   try {
-    console.log(`🔍 Monitoring Tron address: ${address} for user ${userId}`);
-
     // Get recent transactions
     const transactions = await getRecentTransactions(address, 20);
 
     for (const transaction of transactions) {
       const txHash = transaction.txID;
-      
+
       // Skip if already processed
       if (await isTransactionProcessed(txHash)) {
         continue;
@@ -211,7 +223,7 @@ async function monitorTronAddress(userId: number, address: string): Promise<void
       try {
         // Parse TRX transfer
         const transfer = parseTRXTransfer(transaction, address);
-        
+
         if (transfer && transfer.amount > 0) {
           await processDeposit(
             userId,
@@ -241,28 +253,21 @@ export async function monitorTronDeposits(): Promise<void> {
     console.warn('TronWeb not available, skipping Tron deposit monitoring');
     return;
   }
-  
+
   try {
-    console.log('🚀 Starting Tron deposit monitoring...');
-    
-    const addresses = await getUserTronAddresses();
-    
-    if (addresses.length === 0) {
-      console.log('ℹ️ No Tron addresses found to monitor');
-      return;
-    }
+  const addresses = await getUserTronAddresses();
+  
+  if (addresses.length === 0) {
+    return;
+  }
 
-    console.log(`📊 Monitoring ${addresses.length} Tron addresses`);
-
-    // Process all addresses in parallel
-    await Promise.all(
-      addresses.map(({ userId, address }) => 
-        monitorTronAddress(userId, address)
+  // Process all addresses in parallel
+  await Promise.all(
+      addresses.map(({ userId, address }) =>
+      monitorTronAddress(userId, address)
       )
-    );
+  );
 
-    console.log('✅ Tron deposit monitoring completed');
-    
   } catch (error) {
     console.error('❌ Error in Tron deposit monitoring:', error);
   }
@@ -277,13 +282,13 @@ export async function checkTronDepositsForAddress(address: string): Promise<any>
 
   try {
     console.log(`🔍 Checking deposits for address: ${address}`);
-    
+
     // Get recent transactions for this address
     const transactions = await getRecentTransactions(address, 20);
-    
+
     let depositsFound = 0;
     let depositsProcessed = 0;
-    
+
     for (const tx of transactions) {
       if (processedTransactions.has(tx.txID)) {
         continue;
@@ -299,13 +304,13 @@ export async function checkTronDepositsForAddress(address: string): Promise<any>
           if (toBase58 === address) {
             // This is a deposit to our address
             const amount = transfer.amount / 1000000; // Convert from Sun to TRX
-            
+
             if (amount > 0) {
               // Find the user ID for this address
               const wallet = await prisma.wallet.findFirst({
                 where: { publicKey: address, blockchain: 'Tron' }
               });
-              
+
               if (wallet) {
                 await processDeposit(
                   wallet.userId,
@@ -340,13 +345,11 @@ export async function checkTronDepositsForAddress(address: string): Promise<any>
 
 // Start continuous monitoring
 export function startTronDepositMonitoring(): void {
-  console.log('🔄 Starting continuous Tron deposit monitoring...');
-  
-  // Run immediately
-  monitorTronDeposits();
-  
-  // Then run every 5 seconds for near-realtime updates
-  setInterval(monitorTronDeposits, 5000);
+// Run immediately
+monitorTronDeposits();
+
+// Then run every 5 seconds for near-realtime updates
+setInterval(monitorTronDeposits, 5000);
 }
 
 // Get Tron deposit statistics
