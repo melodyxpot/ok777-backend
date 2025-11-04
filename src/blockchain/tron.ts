@@ -162,32 +162,58 @@ const checkBalances = async () => {
             return;
         }
 
-        console.log(`🔍 USDT Contract: ${USDT_CONTRACT}`);
-        console.log(`🔍 Tron Network: ${process.env.TRON_FULLNODE}`);
+        if (wallets.length === 0) {
+            // No wallets to check yet
+            setTimeout(checkBalances, 60 * 1000);
+            return;
+        }
 
         const tronWebIns = getTronWeb();
-        const contract = await tronWebIns.contract().at(USDT_CONTRACT);
 
-
+        // Method 1: Using TronWeb contract (try-catch for each wallet)
         for (const wallet of wallets) {
             const addr = wallet.publicKey;
 
-            const balanceRaw = await contract.balanceOf(addr).call({ from: wallet.publicKey });
-            const balance = new BigNumber(balanceRaw).div(1e6);
+            try {
+                // Call contract using triggerSmartContract for more reliable results
+                const parameter = [{ type: 'address', value: addr }];
+                const options = {};
+                
+                const transaction = await tronWebIns.transactionBuilder.triggerSmartContract(
+                    USDT_CONTRACT,
+                    'balanceOf(address)',
+                    options,
+                    parameter
+                );
 
-            if (balance.gte(MIN_SWEEP_USDT)) {
-                try {
-                    await maybeSweepUserDeposit(wallet.publicKey, wallet.privateKey, '-', wallet.userId, balanceRaw)
-                } catch (err) {
-                    console.error(`❌ USDT sweep failed for user ${wallet.userId}:`, err.message);
+                if (!transaction || !transaction.constant_result || !transaction.constant_result[0]) {
+                    continue;
                 }
+
+                // Decode the result (it's a hex string)
+                const balanceHex = transaction.constant_result[0];
+                const balanceRaw = tronWebIns.toBigNumber(balanceHex);
+                const balance = new BigNumber(balanceRaw.toString()).div(1e6);
+
+                if (balance.gte(MIN_SWEEP_USDT)) {
+                    console.log(`💰 Found ${balance.toString()} USDT for user ${wallet.userId}`);
+                    try {
+                        await maybeSweepUserDeposit(wallet.publicKey, wallet.privateKey, '-', wallet.userId, balanceRaw.toString());
+                    } catch (err) {
+                        console.error(`❌ USDT sweep failed for user ${wallet.userId}:`, err.message);
+                    }
+                }
+            } catch (err) {
+                // Skip this wallet and continue with others
+                console.error(`Error checking balance for ${addr}:`, err.message);
+                continue;
             }
         }
     } catch (err) {
-        console.error('Error checking balances:', err);
+        console.error('Error in checkBalances:', err);
     }
 
-    setTimeout(checkBalances, 60 * 1000)
+    setTimeout(checkBalances, 60 * 1000);
 };
 
 
